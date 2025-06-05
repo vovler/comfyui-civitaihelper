@@ -46,11 +46,10 @@ class CivitaiHelper:
         pass
     
     @classmethod
-    def INPUT_TYPES(cls):
+    def INPUT_TYPES(s):
         input_dir = folder_paths.get_input_directory()
         files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
         files = folder_paths.filter_files_content_types(files, ["image"])
-        
         return {
             "required": {
                 "image": (sorted(files), {"image_upload": True}),
@@ -106,7 +105,7 @@ class CivitaiHelper:
             "3. ⚙️ Configure download settings as needed",
             "4. ▶️ Execute to analyze and download missing models",
             "",
-            "💡 Tip: The uploaded image will be available in ComfyUI's input folder",
+            "💡 Tip: Click 'Choose File' to upload a new image with workflow metadata",
             "",
         ]
         
@@ -116,11 +115,33 @@ class CivitaiHelper:
         default_image = torch.zeros((1, 512, 512, 3), dtype=torch.float32)
         
         try:
-            # Get the actual file path (preserving metadata access)
+            # Handle ComfyUI standard image input (like LoadImage)
+            if not image:
+                log_lines.extend([
+                    "⏳ Waiting for image selection...",
+                    "",
+                    "📁 Use the dropdown above to select an uploaded image",
+                    "📤 Or click 'Choose File' to upload a new image",
+                    "🔍 Looking for a PNG image that was exported from ComfyUI",
+                    "   (should contain workflow metadata)"
+                ])
+                return (default_image, "\n".join(log_lines))
+            
+            # Get the image path using ComfyUI's standard method
             image_path = folder_paths.get_annotated_filepath(image)
             log_lines.append(f"📁 Processing image: {os.path.basename(image_path)}")
             
-            # Load image for preview (using ComfyUI's method but preserving original)
+            # Validate file exists
+            if not os.path.exists(image_path):
+                log_lines.extend([
+                    f"❌ Image file not found: {image_path}",
+                    "",
+                    "💡 Try uploading the image again",
+                    "🔧 Make sure the file exists and is accessible"
+                ])
+                return (default_image, "\n".join(log_lines))
+            
+            # Load image for preview
             image_tensor = self.load_image_for_preview(image_path, log_lines)
             
             # Extract workflow from the ORIGINAL image file (preserves metadata)
