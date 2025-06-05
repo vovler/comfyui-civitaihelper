@@ -47,12 +47,12 @@ class CivitaiHelper:
     
     @classmethod
     def INPUT_TYPES(s):
-        input_dir = folder_paths.get_input_directory()
-        files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
-        files = folder_paths.filter_files_content_types(files, ["image"])
         return {
             "required": {
-                "image": (sorted(files), {"image_upload": True}),
+                "load_test_image": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Load test.png from ComfyUI/input/ folder"
+                }),
             },
             "optional": {
                 "civitai_api_key": ("STRING", {
@@ -88,7 +88,7 @@ class CivitaiHelper:
     CATEGORY = "Civitai Helper"
     OUTPUT_NODE = True
     
-    def process_workflow_image(self, image, civitai_api_key: str = "", 
+    def process_workflow_image(self, load_test_image: bool = True, civitai_api_key: str = "", 
                              comfyui_models_path: str = "", auto_download: bool = False,
                              prefer_safetensors: bool = True, create_backup: bool = False):
         """
@@ -99,13 +99,11 @@ class CivitaiHelper:
             "🎯 Civitai Helper - ComfyUI Workflow Analyzer",
             "=" * 50,
             "",
-            "📋 Instructions:",
-            "1. 📁 Upload or select a PNG workflow image using the dropdown/upload button above",
-            "2. 🔑 Add your Civitai API key to enable downloads", 
-            "3. ⚙️ Configure download settings as needed",
-            "4. ▶️ Execute to analyze and download missing models",
+            "📋 Test Mode - Loading from fixed path:",
+            "🔍 Looking for: ComfyUI/input/test.png",
             "",
-            "💡 Tip: Click 'Choose File' to upload a new image with workflow metadata",
+            "💡 Place your workflow PNG image at ComfyUI/input/test.png",
+            "📝 The image should contain ComfyUI workflow metadata",
             "",
         ]
         
@@ -115,37 +113,35 @@ class CivitaiHelper:
         default_image = torch.zeros((1, 512, 512, 3), dtype=torch.float32)
         
         try:
-            # Handle ComfyUI standard image input (like LoadImage)
-            if not image:
-                log_lines.extend([
-                    "⏳ Waiting for image selection...",
-                    "",
-                    "📁 Use the dropdown above to select an uploaded image",
-                    "📤 Or click 'Choose File' to upload a new image",
-                    "🔍 Looking for a PNG image that was exported from ComfyUI",
-                    "   (should contain workflow metadata)"
-                ])
-                return (default_image, "\n".join(log_lines))
+            # Build path to test.png
+            input_dir = folder_paths.get_input_directory()
+            image_path = os.path.join(input_dir, "test.png")
             
-            # Get the image path using ComfyUI's standard method
-            image_path = folder_paths.get_annotated_filepath(image)
-            log_lines.append(f"📁 Processing image: {os.path.basename(image_path)}")
+            log_lines.append(f"📁 Looking for image at: {image_path}")
             
-            # Validate file exists
+            # Check if file exists
             if not os.path.exists(image_path):
                 log_lines.extend([
+                    "",
                     f"❌ Image file not found: {image_path}",
                     "",
-                    "💡 Try uploading the image again",
-                    "🔧 Make sure the file exists and is accessible"
+                    "📝 To test this node:",
+                    "   1. Place a PNG workflow image at ComfyUI/input/test.png",
+                    "   2. Make sure it's a PNG exported from ComfyUI with workflow metadata",
+                    "   3. Re-execute this node",
+                    "",
+                    f"🔍 Expected path: {image_path}",
+                    f"📁 Input directory: {input_dir}"
                 ])
                 return (default_image, "\n".join(log_lines))
+            
+            log_lines.append(f"✅ Found image file: {os.path.basename(image_path)}")
             
             # Load image for preview
             image_tensor = self.load_image_for_preview(image_path, log_lines)
             
             # Extract workflow from the ORIGINAL image file (preserves metadata)
-            log_lines.append("\n🔍 Extracting workflow metadata from original image...")
+            log_lines.append("\n🔍 Extracting workflow metadata from image...")
             workflow_json = self.extract_workflow_from_image(image_path, log_lines)
             
             if not workflow_json:
@@ -159,8 +155,7 @@ class CivitaiHelper:
                     "   • Try using a PNG image (JPG may not preserve metadata)",
                     "   • The image should have been generated with ComfyUI, not just opened in it",
                     "",
-                    "🔍 This tool analyzes the original uploaded file for metadata,",
-                    "   so workflow information should be preserved if it exists."
+                    "🔍 This tool analyzes the original image file for metadata",
                 ])
                 return (image_tensor, "\n".join(log_lines))
             
@@ -214,10 +209,10 @@ class CivitaiHelper:
                 "",
                 f"💥 Unexpected error: {str(e)}",
                 "",
-                "🔧 Try:",
-                "   • Re-upload the image file", 
-                "   • Ensure the image file isn't corrupted",
-                "   • Check that the file is a valid PNG/JPG image"
+                "🔧 Debug info:",
+                f"   • Input directory: {folder_paths.get_input_directory()}",
+                f"   • Looking for: test.png",
+                f"   • Full path: {os.path.join(folder_paths.get_input_directory(), 'test.png')}"
             ])
             logger.error(f"Error in CivitaiHelper: {str(e)}", exc_info=True)
         
