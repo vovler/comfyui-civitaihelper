@@ -47,69 +47,107 @@ class CivitaiHelper:
     
     @classmethod
     def INPUT_TYPES(cls):
+        input_dir = folder_paths.get_input_directory()
+        files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
+        files = folder_paths.filter_files_content_types(files, ["image"])
+        
         return {
             "required": {
-                "upload_image": ("UPLOAD",),
+                "image": (sorted(files), {"image_upload": True}),
             },
             "optional": {
                 "civitai_api_key": ("STRING", {
                     "multiline": False,
                     "default": "",
-                    "placeholder": "Enter your Civitai API key"
+                    "placeholder": "🔑 Enter your Civitai API key",
+                    "tooltip": "Get your API key from https://civitai.com/user/account"
                 }),
                 "comfyui_models_path": ("STRING", {
                     "multiline": False,
                     "default": "",
-                    "placeholder": "Custom models path (leave empty for auto-detect)"
+                    "placeholder": "📂 Custom models path (leave empty for auto-detect)",
+                    "tooltip": "Override the default ComfyUI models directory"
                 }),
-                "auto_download": ("BOOLEAN", {"default": False}),
-                "prefer_safetensors": ("BOOLEAN", {"default": True}),
-                "create_backup": ("BOOLEAN", {"default": False}),
-                "progress_log": ("STRING", {
-                    "multiline": True,
-                    "default": "Ready to process Civitai workflow image...\n\n1. Click 'Upload' to select a PNG image with ComfyUI workflow metadata\n2. Enter your Civitai API key if you want to download missing models\n3. Optionally set a custom models path\n4. Enable auto_download to automatically download missing models\n5. Execute the node to analyze the workflow",
-                    "placeholder": "Progress and results will appear here..."
+                "auto_download": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Automatically download missing models from Civitai"
+                }),
+                "prefer_safetensors": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Prefer .safetensors files over other formats"
+                }),
+                "create_backup": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Create backup of existing files before overwriting"
                 }),
             }
         }
     
-    RETURN_TYPES = ()
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("🖼️ image_preview", "📋 progress_log")
     FUNCTION = "process_workflow_image"
     CATEGORY = "Civitai Helper"
     OUTPUT_NODE = True
     
-    def process_workflow_image(self, upload_image=None, civitai_api_key: str = "", 
+    def process_workflow_image(self, image, civitai_api_key: str = "", 
                              comfyui_models_path: str = "", auto_download: bool = False,
-                             prefer_safetensors: bool = True, create_backup: bool = False,
-                             progress_log: str = ""):
+                             prefer_safetensors: bool = True, create_backup: bool = False):
         """
         Main function to process Civitai workflow images and handle model downloads
         """
         # Initialize progress log
-        log_lines = ["🚀 Starting Civitai Workflow Analysis", "=" * 50]
+        log_lines = [
+            "🎯 Civitai Helper - ComfyUI Workflow Analyzer",
+            "=" * 50,
+            "",
+            "📋 Instructions:",
+            "1. 📁 Upload or select a PNG workflow image using the dropdown/upload button above",
+            "2. 🔑 Add your Civitai API key to enable downloads", 
+            "3. ⚙️ Configure download settings as needed",
+            "4. ▶️ Execute to analyze and download missing models",
+            "",
+            "💡 Tip: The uploaded image will be available in ComfyUI's input folder",
+            "",
+        ]
+        
+        # Default image tensor (black image)
+        import torch
+        import numpy as np
+        default_image = torch.zeros((1, 512, 512, 3), dtype=torch.float32)
         
         try:
-            # Handle image upload
-            if not upload_image:
-                log_lines.append("❌ No image uploaded. Please upload a PNG image with ComfyUI workflow metadata.")
-                return {"ui": {"text": ["\n".join(log_lines)]}}
+            # Get the actual file path (preserving metadata access)
+            image_path = folder_paths.get_annotated_filepath(image)
+            log_lines.append(f"📁 Processing image: {os.path.basename(image_path)}")
             
-            # Get image path from upload
-            image_path = self.handle_uploaded_image(upload_image, log_lines)
-            if not image_path:
-                return {"ui": {"text": ["\n".join(log_lines)]}}
+            # Load image for preview (using ComfyUI's method but preserving original)
+            image_tensor = self.load_image_for_preview(image_path, log_lines)
             
-            # Extract workflow from image
-            log_lines.append("\n🔍 Extracting workflow metadata from image...")
+            # Extract workflow from the ORIGINAL image file (preserves metadata)
+            log_lines.append("\n🔍 Extracting workflow metadata from original image...")
             workflow_json = self.extract_workflow_from_image(image_path, log_lines)
             
             if not workflow_json:
-                log_lines.append("❌ No ComfyUI workflow found in image metadata")
-                log_lines.append("💡 Make sure the image was exported from ComfyUI with workflow metadata")
-                return {"ui": {"text": ["\n".join(log_lines)]}}
+                log_lines.extend([
+                    "",
+                    "❌ No ComfyUI workflow found in image metadata",
+                    "",
+                    "💡 Troubleshooting:",
+                    "   • Make sure the image was exported from ComfyUI (not just saved)",
+                    "   • Check that 'Save Workflow' is enabled in ComfyUI settings",
+                    "   • Try using a PNG image (JPG may not preserve metadata)",
+                    "   • The image should have been generated with ComfyUI, not just opened in it",
+                    "",
+                    "🔍 This tool analyzes the original uploaded file for metadata,",
+                    "   so workflow information should be preserved if it exists."
+                ])
+                return (image_tensor, "\n".join(log_lines))
             
-            log_lines.append("✅ Successfully extracted workflow from image")
-            log_lines.append(f"📊 Workflow contains {len(workflow_json.get('nodes', []))} nodes")
+            log_lines.extend([
+                "✅ Successfully extracted workflow from image!",
+                f"📊 Workflow contains {len(workflow_json.get('nodes', []))} nodes",
+                ""
+            ])
             
             # Get models path
             models_path = comfyui_models_path.strip() if comfyui_models_path.strip() else folder_paths.models_dir
@@ -125,58 +163,83 @@ class CivitaiHelper:
             # Handle downloads if requested
             if auto_download and missing_models:
                 if not civitai_api_key.strip():
-                    log_lines.append("\n❌ Auto-download enabled but no API key provided")
-                    log_lines.append("💡 Get your API key from: https://civitai.com/user/account")
+                    log_lines.extend([
+                        "",
+                        "❌ Auto-download enabled but no API key provided",
+                        "",
+                        "🔑 To enable downloads:",
+                        "   1. Go to https://civitai.com/user/account",
+                        "   2. Copy your API key",
+                        "   3. Paste it in the 'civitai_api_key' field above",
+                        "   4. Re-execute this node"
+                    ])
                 else:
                     log_lines.append(f"\n📥 Starting automatic download of {len(missing_models)} missing models...")
                     self.download_missing_models(missing_models, civitai_api_key.strip(), models_path, 
                                                prefer_safetensors, create_backup, log_lines)
             elif missing_models and not auto_download:
-                log_lines.append("\n💡 Enable 'auto_download' to automatically download missing models")
+                log_lines.extend([
+                    "",
+                    "💡 To download missing models:",
+                    "   1. Add your Civitai API key above",
+                    "   2. Enable 'auto_download' checkbox", 
+                    "   3. Re-execute this node"
+                ])
             
             log_lines.append("\n✨ Analysis complete!")
             
         except Exception as e:
-            log_lines.append(f"\n💥 Unexpected error: {str(e)}")
+            log_lines.extend([
+                "",
+                f"💥 Unexpected error: {str(e)}",
+                "",
+                "🔧 Try:",
+                "   • Re-upload the image file", 
+                "   • Ensure the image file isn't corrupted",
+                "   • Check that the file is a valid PNG/JPG image"
+            ])
             logger.error(f"Error in CivitaiHelper: {str(e)}", exc_info=True)
         
-        return {"ui": {"text": ["\n".join(log_lines)]}}
+        return (image_tensor, "\n".join(log_lines))
     
-    def handle_uploaded_image(self, upload_image, log_lines: List[str]) -> Optional[str]:
+    def load_image_for_preview(self, image_path: str, log_lines: List[str]) -> torch.Tensor:
         """
-        Handle the uploaded image and return its path
+        Load image for preview using ComfyUI's standard method
         """
         try:
-            # Handle different upload formats
-            if hasattr(upload_image, 'name'):
-                image_path = upload_image.name
-                log_lines.append(f"📁 Uploaded image: {os.path.basename(image_path)}")
-            elif isinstance(upload_image, str):
-                image_path = upload_image
-                log_lines.append(f"📁 Image path: {os.path.basename(image_path)}")
-            else:
-                log_lines.append(f"❓ Unknown upload format: {type(upload_image)}")
-                return None
-            
-            # Validate file exists
-            if not os.path.exists(image_path):
-                log_lines.append(f"❌ Image file not found: {image_path}")
-                return None
-            
-            # Validate file type
-            if not image_path.lower().endswith(('.png', '.jpg', '.jpeg')):
-                log_lines.append(f"❌ Unsupported file type. Must be PNG, JPG, or JPEG")
-                return None
+            import torch
+            import numpy as np
+            from PIL import ImageSequence, ImageOps
+            import comfy.utils as comfy_utils
             
             # Get file info
             file_size = os.path.getsize(image_path)
             log_lines.append(f"📏 File size: {format_file_size(file_size)}")
             
-            return image_path
+            # Load image using ComfyUI's method (similar to LoadImage)
+            img = Image.open(image_path)
+            log_lines.append(f"🖼️ Image: {img.format} {img.size} {img.mode}")
+            
+            # Handle EXIF orientation
+            img = ImageOps.exif_transpose(img)
+            
+            # Convert to RGB
+            if img.mode == 'I':
+                img = img.point(lambda i: i * (1 / 255))
+            image = img.convert("RGB")
+            
+            # Convert to tensor
+            image_array = np.array(image).astype(np.float32) / 255.0
+            image_tensor = torch.from_numpy(image_array)[None,]
+            
+            log_lines.append(f"✅ Image loaded for preview: {image_tensor.shape}")
+            
+            return image_tensor
             
         except Exception as e:
-            log_lines.append(f"❌ Error handling uploaded image: {str(e)}")
-            return None
+            log_lines.append(f"❌ Error loading image for preview: {str(e)}")
+            # Return black image as fallback
+            return torch.zeros((1, 512, 512, 3), dtype=torch.float32)
     
     def extract_workflow_from_image(self, image_path: str, log_lines: List[str]) -> Optional[Dict]:
         """
@@ -454,4 +517,24 @@ class CivitaiHelper:
             if matching_files:
                 return matching_files[0]
         
-        return files[0] 
+        return files[0]
+
+    @classmethod
+    def IS_CHANGED(cls, image):
+        """
+        Check if the image file has changed (similar to LoadImage)
+        """
+        image_path = folder_paths.get_annotated_filepath(image)
+        m = hashlib.sha256()
+        with open(image_path, 'rb') as f:
+            m.update(f.read())
+        return m.digest().hex()
+    
+    @classmethod
+    def VALIDATE_INPUTS(cls, image):
+        """
+        Validate the input image file (similar to LoadImage)
+        """
+        if not folder_paths.exists_annotated_filepath(image):
+            return "Invalid image file: {}".format(image)
+        return True 
