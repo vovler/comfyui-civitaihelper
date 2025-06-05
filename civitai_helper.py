@@ -528,24 +528,4 @@ class CivitaiHelper:
             if matching_files:
                 return matching_files[0]
         
-        return files[0]
-
-    @classmethod
-    def IS_CHANGED(cls, image):
-        """
-        Check if the image file has changed (similar to LoadImage)
-        """
-        image_path = folder_paths.get_annotated_filepath(image)
-        m = hashlib.sha256()
-        with open(image_path, 'rb') as f:
-            m.update(f.read())
-        return m.digest().hex()
-    
-    @classmethod
-    def VALIDATE_INPUTS(cls, image):
-        """
-        Validate the input image file (similar to LoadImage)
-        """
-        if not folder_paths.exists_annotated_filepath(image):
-            return "Invalid image file: {}".format(image)
-        return True 
+        return files[0] 
