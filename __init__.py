@@ -1,19 +1,11 @@
-from .civitai_helper import CivitaiWorkflowParser, CivitaiModelDownloader, CivitaiSettingsNode, CivitaiImageHandler, ShowText
+from .civitai_helper import CivitaiHelper
 
 NODE_CLASS_MAPPINGS = {
-    "🎨 Civitai Workflow Parser": CivitaiWorkflowParser,
-    "📥 Civitai Model Downloader": CivitaiModelDownloader,
-    "⚙️ Civitai Settings": CivitaiSettingsNode,
-    "🖼️ Civitai Image Handler": CivitaiImageHandler,
-    "📝 Show Text": ShowText,
+    "🎯 Civitai Helper": CivitaiHelper,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "🎨 Civitai Workflow Parser": "🎨 Civitai Workflow Parser",
-    "📥 Civitai Model Downloader": "📥 Civitai Model Downloader",
-    "⚙️ Civitai Settings": "⚙️ Civitai Settings",
-    "🖼️ Civitai Image Handler": "🖼️ Civitai Image Handler",
-    "📝 Show Text": "📝 Show Text",
+    "🎯 Civitai Helper": "🎯 Civitai Helper",
 }
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS'] 
