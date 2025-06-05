@@ -84,8 +84,8 @@ class CivitaiHelper:
             }
         }
     
-    RETURN_TYPES = ("IMAGE", "STRING")
-    RETURN_NAMES = ("🖼️ image_preview", "📋 progress_log")
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING")
+    RETURN_NAMES = ("🖼️ image_preview", "📋 progress_log", "🐛 raw_metadata_debug")
     FUNCTION = "process_workflow_image"
     CATEGORY = "Civitai Helper"
     OUTPUT_NODE = True
@@ -96,7 +96,8 @@ class CivitaiHelper:
         """
         Main function to process Civitai workflow images and handle model downloads
         """
-        # Initialize progress log
+        # Initialize progress log and debug output
+        raw_metadata_debug = ""
         log_lines = [
             "🎯 Civitai Helper - ComfyUI Workflow Analyzer",
             "=" * 50,
@@ -133,7 +134,7 @@ class CivitaiHelper:
                     f"🔍 Expected path: {image_path}",
                     f"📁 Input directory: {input_dir}"
                 ])
-                return (default_image, "\n".join(log_lines))
+                return (default_image, "\n".join(log_lines), "")
             
             log_lines.append(f"✅ Found image file: {os.path.basename(image_path)}")
             
@@ -142,7 +143,7 @@ class CivitaiHelper:
             
             # Extract workflow from the ORIGINAL image file (preserves metadata)
             log_lines.append("\n🔍 Extracting workflow metadata from image...")
-            workflow_json = self.extract_workflow_from_image(image_path, log_lines)
+            workflow_json, raw_metadata_debug = self.extract_workflow_from_image(image_path, log_lines)
             
             if not workflow_json:
                 log_lines.extend([
@@ -157,7 +158,7 @@ class CivitaiHelper:
                     "",
                     "🔍 This tool analyzes the original image file for metadata",
                 ])
-                return (image_tensor, "\n".join(log_lines))
+                return (image_tensor, "\n".join(log_lines), raw_metadata_debug)
             
             log_lines.extend([
                 "✅ Successfully extracted workflow from image!",
@@ -216,7 +217,7 @@ class CivitaiHelper:
             ])
             logger.error(f"Error in CivitaiHelper: {str(e)}", exc_info=True)
         
-        return (image_tensor, "\n".join(log_lines))
+        return (image_tensor, "\n".join(log_lines), raw_metadata_debug)
     
     def load_image_for_preview(self, image_path: str, log_lines: List[str]) -> torch.Tensor:
         """
@@ -252,10 +253,13 @@ class CivitaiHelper:
             # Return black image as fallback
             return torch.zeros((1, 512, 512, 3), dtype=torch.float32)
     
-    def extract_workflow_from_image(self, image_path: str, log_lines: List[str]) -> Optional[Dict]:
+    def extract_workflow_from_image(self, image_path: str, log_lines: List[str]) -> Tuple[Optional[Dict], str]:
         """
         Extract workflow from image with detailed logging
+        Returns: (workflow_dict, raw_metadata_debug)
         """
+        raw_metadata_debug = ""
+        
         try:
             with Image.open(image_path) as img:
                 log_lines.append(f"🖼️ Image: {img.format} {img.size} {img.mode}")
@@ -269,10 +273,16 @@ class CivitaiHelper:
                             log_lines.append(f"🔍 Found workflow in field: {field}")
                             workflow_data = img.text[field]
                             
+                            # Add to debug output
+                            raw_metadata_debug += f"=== TEXT METADATA FIELD: {field} ===\n"
+                            raw_metadata_debug += f"Length: {len(workflow_data)} characters\n"
+                            raw_metadata_debug += f"First 500 chars: {workflow_data[:500]}\n"
+                            raw_metadata_debug += f"Last 500 chars: {workflow_data[-500:]}\n\n"
+                            
                             workflow = validate_workflow_json(workflow_data)
                             if workflow:
                                 log_lines.append(f"✅ Successfully parsed workflow JSON ({len(workflow_data)} chars)")
-                                return workflow
+                                return workflow, raw_metadata_debug
                             else:
                                 log_lines.append(f"❌ Invalid JSON in field: {field}")
                 
@@ -283,22 +293,42 @@ class CivitaiHelper:
                     for key, value in img.info.items():
                         if any(field.lower() in key.lower() for field in WORKFLOW_METADATA_FIELDS):
                             log_lines.append(f"🔍 Found workflow in PNG info: {key}")
-                            workflow = validate_workflow_json(str(value))
+                            value_str = str(value)
+                            
+                            # Add to debug output
+                            raw_metadata_debug += f"=== PNG INFO FIELD: {key} ===\n"
+                            raw_metadata_debug += f"Type: {type(value)}\n"
+                            raw_metadata_debug += f"Length: {len(value_str)} characters\n"
+                            raw_metadata_debug += f"First 500 chars: {value_str[:500]}\n"
+                            raw_metadata_debug += f"Last 500 chars: {value_str[-500:]}\n\n"
+                            
+                            workflow = validate_workflow_json(value_str)
                             if workflow:
                                 log_lines.append(f"✅ Successfully parsed workflow from PNG info")
-                                return workflow
+                                return workflow, raw_metadata_debug
                 
                 # List available metadata for debugging
                 if hasattr(img, 'text'):
                     log_lines.append("📋 Available text metadata fields:")
                     for key in list(img.text.keys())[:10]:  # Limit to first 10
                         log_lines.append(f"   • {key}")
+                        
+                        # Add all fields to debug output
+                        raw_metadata_debug += f"=== ALL TEXT FIELD: {key} ===\n"
+                        raw_metadata_debug += f"Length: {len(img.text[key])} characters\n"
+                        raw_metadata_debug += f"Content preview: {img.text[key][:200]}...\n\n"
                 
-                return None
+                if hasattr(img, 'info'):
+                    raw_metadata_debug += "\n=== ALL PNG INFO FIELDS ===\n"
+                    for key, value in img.info.items():
+                        raw_metadata_debug += f"Key: {key}, Type: {type(value)}, Length: {len(str(value))}\n"
+                
+                return None, raw_metadata_debug
                 
         except Exception as e:
             log_lines.append(f"💥 Error reading image: {str(e)}")
-            return None
+            raw_metadata_debug += f"ERROR: {str(e)}\n"
+            return None, raw_metadata_debug
     
     def analyze_workflow_models(self, workflow: Dict, models_path: str, log_lines: List[str]) -> List[Dict]:
         """
