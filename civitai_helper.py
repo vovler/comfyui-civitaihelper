@@ -37,6 +37,330 @@ from .settings import get_civitai_api_key, save_civitai_api_key
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+class CivitaiImageHandler:
+    """
+    Node for handling raw image uploads with full metadata preservation
+    """
+    
+    def __init__(self):
+        pass
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {},
+            "optional": {
+                "image": ("IMAGE",),  # Standard ComfyUI image input
+                "upload": ("UPLOAD",),  # Raw file upload that preserves metadata
+            }
+        }
+    
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("workflow_json", "missing_models", "model_info", "debug_info", "image_path")
+    FUNCTION = "handle_image_with_metadata"
+    CATEGORY = "Civitai Helper"
+    
+    def handle_image_with_metadata(self, image=None, upload=None):
+        """
+        Handle image input while preserving metadata, with detailed debug output
+        """
+        debug_messages = []
+        
+        try:
+            # Determine image source and get file path
+            image_path = None
+            
+            if upload is not None:
+                debug_messages.append("✅ Using UPLOAD input (preserves metadata)")
+                # Handle upload input - this preserves the original file
+                if hasattr(upload, 'name'):
+                    # File upload object
+                    image_path = upload.name
+                    debug_messages.append(f"📁 Upload file path: {image_path}")
+                elif isinstance(upload, str):
+                    # File path string
+                    image_path = upload
+                    debug_messages.append(f"📁 Upload path string: {image_path}")
+                else:
+                    debug_messages.append(f"❓ Upload type: {type(upload)}")
+                    debug_messages.append(f"❓ Upload value: {str(upload)[:200]}")
+                    
+            elif image is not None:
+                debug_messages.append("⚠️ Using IMAGE input (may lose metadata)")
+                # Try to save the tensor back to a file, but this likely loses metadata
+                image_path = self.save_tensor_to_temp_file(image, debug_messages)
+                
+            else:
+                error_msg = "❌ No image provided. Please drag & drop an image or use the upload input."
+                debug_messages.append(error_msg)
+                return ("", "", "", "\n".join(debug_messages), "")
+            
+            if not image_path or not os.path.exists(image_path):
+                error_msg = f"❌ Image file not found: {image_path}"
+                debug_messages.append(error_msg)
+                return ("", "", "", "\n".join(debug_messages), "")
+            
+            # Validate file type
+            if not image_path.lower().endswith(('.png', '.jpg', '.jpeg')):
+                error_msg = f"❌ Unsupported file type. Must be PNG, JPG, or JPEG: {image_path}"
+                debug_messages.append(error_msg)
+                return ("", "", "", "\n".join(debug_messages), image_path)
+            
+            debug_messages.append(f"✅ Valid image file: {os.path.basename(image_path)}")
+            
+            # Extract workflow from the image
+            debug_messages.append("🔍 Extracting workflow metadata...")
+            workflow_json, extraction_debug = self.extract_workflow_with_debug(image_path)
+            debug_messages.extend(extraction_debug)
+            
+            if not workflow_json:
+                error_msg = "❌ No ComfyUI workflow found in image metadata"
+                debug_messages.append(error_msg)
+                return ("", "", "", "\n".join(debug_messages), image_path)
+            
+            debug_messages.append("✅ Successfully extracted workflow from image")
+            debug_messages.append(f"📊 Workflow contains {len(workflow_json.get('nodes', []))} nodes")
+            
+            # Identify missing models
+            debug_messages.append("🔍 Analyzing workflow for missing models...")
+            missing_models = self.identify_missing_models_with_debug(workflow_json, debug_messages)
+            
+            # Generate model info summary
+            model_info = self.generate_model_info_summary(workflow_json, missing_models)
+            debug_messages.append(f"📋 Generated model summary ({len(missing_models)} missing)")
+            
+            return (
+                json.dumps(workflow_json, indent=2),
+                json.dumps(missing_models, indent=2),
+                model_info,
+                "\n".join(debug_messages),
+                image_path
+            )
+            
+        except Exception as e:
+            error_msg = f"💥 Unexpected error: {str(e)}"
+            debug_messages.append(error_msg)
+            logger.error(f"Error in CivitaiImageHandler: {str(e)}", exc_info=True)
+            return ("", "", "", "\n".join(debug_messages), "")
+    
+    def save_tensor_to_temp_file(self, image_tensor, debug_messages):
+        """
+        Save image tensor to temporary file (may lose metadata)
+        """
+        try:
+            import numpy as np
+            from PIL import Image as PILImage
+            
+            debug_messages.append("🔄 Converting tensor to temporary file...")
+            
+            # Convert tensor to PIL Image
+            if hasattr(image_tensor, 'numpy'):
+                image_array = image_tensor.numpy()
+            else:
+                image_array = image_tensor
+            
+            # Handle different tensor formats
+            if len(image_array.shape) == 4:  # Batch dimension
+                image_array = image_array[0]
+                debug_messages.append("📐 Removed batch dimension")
+            
+            # Convert to 0-255 range if needed
+            if image_array.max() <= 1.0:
+                image_array = (image_array * 255).astype(np.uint8)
+                debug_messages.append("🔢 Converted from 0-1 to 0-255 range")
+            else:
+                image_array = image_array.astype(np.uint8)
+            
+            # Create PIL Image
+            pil_image = PILImage.fromarray(image_array)
+            debug_messages.append(f"🖼️ Created PIL image: {pil_image.size}")
+            
+            # Save to temporary file
+            temp_fd, temp_path = tempfile.mkstemp(suffix='.png')
+            os.close(temp_fd)
+            pil_image.save(temp_path, 'PNG')
+            debug_messages.append(f"💾 Saved to temporary file: {temp_path}")
+            
+            return temp_path
+            
+        except Exception as e:
+            error_msg = f"❌ Error converting tensor to file: {str(e)}"
+            debug_messages.append(error_msg)
+            return None
+    
+    def extract_workflow_with_debug(self, image_path: str) -> Tuple[Optional[Dict], List[str]]:
+        """
+        Extract workflow with detailed debug information
+        """
+        debug_messages = []
+        
+        try:
+            debug_messages.append(f"📂 Opening image file: {os.path.basename(image_path)}")
+            debug_messages.append(f"📏 File size: {format_file_size(os.path.getsize(image_path))}")
+            
+            with Image.open(image_path) as img:
+                debug_messages.append(f"🖼️ Image format: {img.format}")
+                debug_messages.append(f"📐 Image size: {img.size}")
+                debug_messages.append(f"🎨 Image mode: {img.mode}")
+                
+                # Check for workflow in text chunks
+                if hasattr(img, 'text'):
+                    debug_messages.append(f"📝 Found {len(img.text)} text metadata fields")
+                    
+                    for key in WORKFLOW_METADATA_FIELDS:
+                        if key in img.text:
+                            debug_messages.append(f"🔍 Found metadata field: {key}")
+                            workflow_data = img.text[key]
+                            debug_messages.append(f"📊 Metadata size: {len(workflow_data)} characters")
+                            
+                            workflow = validate_workflow_json(workflow_data)
+                            if workflow:
+                                debug_messages.append(f"✅ Successfully parsed workflow from: {key}")
+                                return workflow, debug_messages
+                            else:
+                                debug_messages.append(f"❌ Invalid JSON in field: {key}")
+                    
+                    # List all available text fields for debugging
+                    debug_messages.append("📋 Available text metadata fields:")
+                    for key in img.text.keys():
+                        value_preview = str(img.text[key])[:50] + "..." if len(str(img.text[key])) > 50 else str(img.text[key])
+                        debug_messages.append(f"  • {key}: {value_preview}")
+                else:
+                    debug_messages.append("❌ No text metadata found in image")
+                
+                # Check PNG info chunks
+                if hasattr(img, 'info'):
+                    debug_messages.append(f"📝 Found {len(img.info)} PNG info fields")
+                    
+                    for key, value in img.info.items():
+                        if any(field.lower() in key.lower() for field in WORKFLOW_METADATA_FIELDS):
+                            debug_messages.append(f"🔍 Found info field: {key}")
+                            workflow = validate_workflow_json(str(value))
+                            if workflow:
+                                debug_messages.append(f"✅ Successfully parsed workflow from PNG info: {key}")
+                                return workflow, debug_messages
+                            else:
+                                debug_messages.append(f"❌ Invalid JSON in PNG info field: {key}")
+                    
+                    # List all available info fields for debugging
+                    debug_messages.append("📋 Available PNG info fields:")
+                    for key in img.info.keys():
+                        debug_messages.append(f"  • {key}")
+                else:
+                    debug_messages.append("❌ No PNG info metadata found")
+                
+                # Try to find base64 encoded workflow data
+                if hasattr(img, 'text'):
+                    debug_messages.append("🔍 Searching for base64 encoded workflows...")
+                    for key, value in img.text.items():
+                        if len(value) > 100 and self.looks_like_base64(value):
+                            debug_messages.append(f"🔍 Found potential base64 data in: {key}")
+                            try:
+                                decoded = base64.b64decode(value).decode('utf-8')
+                                workflow = validate_workflow_json(decoded)
+                                if workflow:
+                                    debug_messages.append(f"✅ Successfully decoded base64 workflow from: {key}")
+                                    return workflow, debug_messages
+                            except Exception as e:
+                                debug_messages.append(f"❌ Base64 decode failed for {key}: {str(e)}")
+                
+                debug_messages.append("❌ No valid workflow found in any metadata field")
+                return None, debug_messages
+                
+        except Exception as e:
+            error_msg = f"💥 Error reading image file: {str(e)}"
+            debug_messages.append(error_msg)
+            return None, debug_messages
+    
+    def looks_like_base64(self, data: str) -> bool:
+        """Check if string looks like base64 encoded data"""
+        try:
+            if len(data) % 4 != 0:
+                return False
+            base64.b64decode(data, validate=True)
+            return True
+        except Exception:
+            return False
+    
+    def identify_missing_models_with_debug(self, workflow: Dict, debug_messages: List[str]) -> List[Dict]:
+        """
+        Identify missing models with debug output
+        """
+        try:
+            # Get ComfyUI models path
+            models_base_path = folder_paths.models_dir
+            debug_messages.append(f"📁 Models directory: {models_base_path}")
+            
+            # Ensure model directories exist
+            create_model_directories(models_base_path)
+            
+            # Find all models referenced in workflow
+            referenced_models = find_models_in_workflow(workflow)
+            debug_messages.append(f"🔍 Found {len(referenced_models)} model references in workflow")
+            
+            missing_models = []
+            for model in referenced_models:
+                model_name = model['name']
+                model_type = model['type']
+                
+                debug_messages.append(f"🔍 Checking {model_type}: {model_name}")
+                
+                # Check if model exists
+                model_dir = os.path.join(models_base_path, model_type)
+                existing_file = find_existing_model_file(model_name, model_dir, model_type)
+                
+                if not existing_file:
+                    debug_messages.append(f"❌ Missing: {model_name}")
+                    missing_models.append({
+                        'name': model_name,
+                        'type': model_type,
+                        'node_id': model['node_id'],
+                        'class_type': model.get('class_type', ''),
+                        'input_key': model.get('input_key', ''),
+                        'search_attempted': False,
+                        'civitai_id': None,
+                        'download_url': None
+                    })
+                else:
+                    debug_messages.append(f"✅ Found: {model_name} at {existing_file}")
+            
+            debug_messages.append(f"📊 Summary: {len(missing_models)} missing out of {len(referenced_models)} total")
+            return missing_models
+            
+        except Exception as e:
+            error_msg = f"💥 Error analyzing models: {str(e)}"
+            debug_messages.append(error_msg)
+            return []
+    
+    def generate_model_info_summary(self, workflow: Dict, missing_models: List[Dict]) -> str:
+        """
+        Generate a summary of all models in the workflow
+        """
+        all_models = find_models_in_workflow(workflow)
+        
+        summary = f"Workflow Model Summary:\n"
+        summary += f"Total models referenced: {len(all_models)}\n"
+        summary += f"Missing models: {len(missing_models)}\n\n"
+        
+        # Group by type
+        by_type = {}
+        for model in all_models:
+            model_type = model['type']
+            if model_type not in by_type:
+                by_type[model_type] = []
+            by_type[model_type].append(model['name'])
+        
+        for model_type, models in by_type.items():
+            summary += f"{model_type.title()}: {len(models)} models\n"
+            for model_name in models:
+                is_missing = any(m['name'] == model_name for m in missing_models)
+                status = "❌ MISSING" if is_missing else "✅ Found"
+                summary += f"  • {model_name} [{status}]\n"
+            summary += "\n"
+        
+        return summary
+
+
 class CivitaiWorkflowParser:
     """
     ComfyUI Node for parsing Civitai PNG workflow images and automatically downloading missing models
@@ -661,4 +985,48 @@ class CivitaiSettingsNode:
                 return ("✅ API key cleared", "API key has been removed from settings")
             
         except Exception as e:
-            return (f"❌ Error: {str(e)}", "Failed to manage settings") 
+            return (f"❌ Error: {str(e)}", "Failed to manage settings")
+
+
+class ShowText:
+    """
+    Simple node for displaying text outputs from other nodes
+    """
+    
+    def __init__(self):
+        pass
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"forceInput": True}),
+            },
+            "optional": {
+                "title": ("STRING", {
+                    "multiline": False,
+                    "default": "Text Output",
+                    "placeholder": "Optional title for the text display"
+                }),
+            }
+        }
+    
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "show_text"
+    CATEGORY = "Civitai Helper"
+    OUTPUT_NODE = True
+    
+    def show_text(self, text: str, title: str = "Text Output"):
+        """
+        Display text and pass it through
+        """
+        # Print to console for debugging
+        print(f"\n{'='*50}")
+        print(f"{title}")
+        print(f"{'='*50}")
+        print(text)
+        print(f"{'='*50}\n")
+        
+        # Return the text for potential chaining
+        return (text,) 
