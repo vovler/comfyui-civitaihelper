@@ -3,12 +3,14 @@ import os
 import hashlib
 import base64
 import requests
-from PIL import Image
+from PIL import Image, ImageSequence, ImageOps
 from PIL.PngImagePlugin import PngInfo
 import comfy.model_management
 import folder_paths
 import tempfile
 import shutil
+import torch
+import numpy as np
 from typing import Dict, List, Optional, Tuple
 import logging
 
@@ -108,8 +110,6 @@ class CivitaiHelper:
         ]
         
         # Default image tensor (black image)
-        import torch
-        import numpy as np
         default_image = torch.zeros((1, 512, 512, 3), dtype=torch.float32)
         
         try:
@@ -223,11 +223,6 @@ class CivitaiHelper:
         Load image for preview using ComfyUI's standard method
         """
         try:
-            import torch
-            import numpy as np
-            from PIL import ImageSequence, ImageOps
-            import comfy.utils as comfy_utils
-            
             # Get file info
             file_size = os.path.getsize(image_path)
             log_lines.append(f"📏 File size: {format_file_size(file_size)}")
