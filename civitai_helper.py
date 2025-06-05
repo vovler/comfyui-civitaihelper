@@ -48,10 +48,15 @@ class CivitaiImageHandler:
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {},
+            "required": {
+                "image": ("IMAGE",),  # Drag & drop image support
+            },
             "optional": {
-                "image": ("IMAGE",),  # Standard ComfyUI image input
-                "upload": ("UPLOAD",),  # Raw file upload that preserves metadata
+                "image_path": ("STRING", {
+                    "multiline": False,
+                    "default": "",
+                    "placeholder": "Or enter direct path to PNG workflow image"
+                }),
             }
         }
     
@@ -60,7 +65,7 @@ class CivitaiImageHandler:
     FUNCTION = "handle_image_with_metadata"
     CATEGORY = "Civitai Helper"
     
-    def handle_image_with_metadata(self, image=None, upload=None):
+    def handle_image_with_metadata(self, image=None, image_path: str = ""):
         """
         Handle image input while preserving metadata, with detailed debug output
         """
@@ -68,55 +73,51 @@ class CivitaiImageHandler:
         
         try:
             # Determine image source and get file path
-            image_path = None
+            target_image_path = None
             
-            if upload is not None:
-                debug_messages.append("✅ Using UPLOAD input (preserves metadata)")
-                # Handle upload input - this preserves the original file
-                if hasattr(upload, 'name'):
-                    # File upload object
-                    image_path = upload.name
-                    debug_messages.append(f"📁 Upload file path: {image_path}")
-                elif isinstance(upload, str):
-                    # File path string
-                    image_path = upload
-                    debug_messages.append(f"📁 Upload path string: {image_path}")
-                else:
-                    debug_messages.append(f"❓ Upload type: {type(upload)}")
-                    debug_messages.append(f"❓ Upload value: {str(upload)[:200]}")
-                    
+            # First try to use direct path if provided
+            if image_path and os.path.exists(image_path):
+                debug_messages.append("✅ Using direct image_path input (preserves metadata)")
+                target_image_path = image_path
+                debug_messages.append(f"📁 Direct path: {target_image_path}")
+                
             elif image is not None:
-                debug_messages.append("⚠️ Using IMAGE input (may lose metadata)")
-                # Try to save the tensor back to a file, but this likely loses metadata
-                image_path = self.save_tensor_to_temp_file(image, debug_messages)
+                debug_messages.append("⚠️ Using IMAGE input (metadata may be lost)")
+                # Try to find the original image path from ComfyUI's temp storage
+                target_image_path = self.get_original_image_path(image, debug_messages)
+                
+                # Fall back to saving the tensor to a temp file
+                if not target_image_path:
+                    debug_messages.append("🔄 Falling back to tensor conversion...")
+                    target_image_path = self.save_tensor_to_temp_file(image, debug_messages)
                 
             else:
-                error_msg = "❌ No image provided. Please drag & drop an image or use the upload input."
+                error_msg = "❌ No image provided. Please drag & drop an image or provide image_path."
                 debug_messages.append(error_msg)
                 return ("", "", "", "\n".join(debug_messages), "")
             
-            if not image_path or not os.path.exists(image_path):
-                error_msg = f"❌ Image file not found: {image_path}"
+            if not target_image_path or not os.path.exists(target_image_path):
+                error_msg = f"❌ Image file not found: {target_image_path}"
                 debug_messages.append(error_msg)
                 return ("", "", "", "\n".join(debug_messages), "")
             
             # Validate file type
-            if not image_path.lower().endswith(('.png', '.jpg', '.jpeg')):
-                error_msg = f"❌ Unsupported file type. Must be PNG, JPG, or JPEG: {image_path}"
+            if not target_image_path.lower().endswith(('.png', '.jpg', '.jpeg')):
+                error_msg = f"❌ Unsupported file type. Must be PNG, JPG, or JPEG: {target_image_path}"
                 debug_messages.append(error_msg)
-                return ("", "", "", "\n".join(debug_messages), image_path)
+                return ("", "", "", "\n".join(debug_messages), target_image_path)
             
-            debug_messages.append(f"✅ Valid image file: {os.path.basename(image_path)}")
+            debug_messages.append(f"✅ Valid image file: {os.path.basename(target_image_path)}")
             
             # Extract workflow from the image
             debug_messages.append("🔍 Extracting workflow metadata...")
-            workflow_json, extraction_debug = self.extract_workflow_with_debug(image_path)
+            workflow_json, extraction_debug = self.extract_workflow_with_debug(target_image_path)
             debug_messages.extend(extraction_debug)
             
             if not workflow_json:
                 error_msg = "❌ No ComfyUI workflow found in image metadata"
                 debug_messages.append(error_msg)
-                return ("", "", "", "\n".join(debug_messages), image_path)
+                return ("", "", "", "\n".join(debug_messages), target_image_path)
             
             debug_messages.append("✅ Successfully extracted workflow from image")
             debug_messages.append(f"📊 Workflow contains {len(workflow_json.get('nodes', []))} nodes")
@@ -134,7 +135,7 @@ class CivitaiImageHandler:
                 json.dumps(missing_models, indent=2),
                 model_info,
                 "\n".join(debug_messages),
-                image_path
+                target_image_path
             )
             
         except Exception as e:
@@ -142,6 +143,48 @@ class CivitaiImageHandler:
             debug_messages.append(error_msg)
             logger.error(f"Error in CivitaiImageHandler: {str(e)}", exc_info=True)
             return ("", "", "", "\n".join(debug_messages), "")
+    
+    def get_original_image_path(self, image_tensor, debug_messages):
+        """
+        Try to get the original image path from ComfyUI's internal storage
+        """
+        try:
+            # Check if there's metadata attached to the tensor
+            if hasattr(image_tensor, 'filename'):
+                debug_messages.append(f"📁 Found filename in tensor: {image_tensor.filename}")
+                return image_tensor.filename
+            
+            # Try to access ComfyUI's temporary files
+            import folder_paths
+            temp_dir = folder_paths.get_temp_directory()
+            
+            # Look for recently modified PNG files in temp directory
+            recent_files = []
+            if os.path.exists(temp_dir):
+                for file in os.listdir(temp_dir):
+                    if file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                        file_path = os.path.join(temp_dir, file)
+                        recent_files.append((file_path, os.path.getmtime(file_path)))
+                
+                # Sort by modification time (most recent first)
+                recent_files.sort(key=lambda x: x[1], reverse=True)
+                
+                # Check the most recent files for workflow metadata
+                for file_path, _ in recent_files[:5]:  # Check top 5 most recent
+                    try:
+                        with Image.open(file_path) as img:
+                            if hasattr(img, 'text') and any(key in img.text for key in WORKFLOW_METADATA_FIELDS):
+                                debug_messages.append(f"🎯 Found workflow metadata in recent file: {file_path}")
+                                return file_path
+                    except Exception:
+                        continue
+            
+            debug_messages.append("❌ Could not find original image path with metadata")
+            return None
+            
+        except Exception as e:
+            debug_messages.append(f"❌ Error accessing original image path: {str(e)}")
+            return None
     
     def save_tensor_to_temp_file(self, image_tensor, debug_messages):
         """
